@@ -1,5 +1,15 @@
+> このドキュメントは
+> docker imageをアップルシリコン製マックに対応させようと思い書き始めましたが、どうやらUbuntu上でdarwin/arm64に対応させることは無理なようです。
+> それならラズベリーパイ5用に作ろうかな、とも思いましたが、今までのdockerの操作感が失われてしまう割に、ラズパイにしか対応させられないので、やめました。
+> 
+> 2024年11月24日
+
+
+
+
+
 ## はじめに
-`Apple Silicon（M1、M2など）のMac`やラズベリーパイなどマルチプラットフォームイメージを作成するためのハウツーについて、自らの学習としてアウトプットします。
+ラズベリーパイなどマルチプラットフォームイメージを作成するためのハウツーについて、自らの学習としてアウトプットします。（`Apple Silicon（M1、M2など）のMac`を除く）
 
 [docker-buildxとmulti-platform build周りについてまとめ](https://zenn.dev/bells17/articles/docker-buildx)
 
@@ -9,6 +19,7 @@ https://zenn.dev/bells17/articles/docker-buildx
 
 この記事では[上記記事](https://zenn.dev/bells17/articles/docker-buildx)からつまみ食い的に重要な点をまとめ、また記事に書かれていないが気になった点を整理します。
 
+![](assets/eye-catch.png)
 
 ## 動機
 顔認識フレームワーク[`FACE01`](https://github.com/yKesamaru/FACE01_DEV)では、[Docker Image](https://hub.docker.com/u/tokaikaoninsho)を用意しています。
@@ -51,54 +62,148 @@ FACE01のユーザー様から上記Issueを頂きました。わたしはApple 
         docker buildx create --name mycontainerbuilder --driver docker-container
         ```
         使用する際は、`docker buildx use mycontainerbuilder`で切り替える。
+- `qemu`と`qemu-user-static`の違い
+  | 特徴                | qemu                             | qemu-user-static                        |
+  |---------------------|----------------------------------|-----------------------------------------|
+  | 提供モード           | フルシステムエミュレーション + ユーザーモード | ユーザーモードのみ                       |
+  | 動作モード           | ダイナミックリンク（依存ライブラリ必要）     | スタティックリンク（依存ライブラリ不要） |
+  | 使用目的             | 仮想マシン全体のエミュレーション           | Dockerコンテナ内のバイナリ実行           |
+  | 対象                | フル機能を必要とする開発環境             | 軽量で移植性が必要な環境                 |
+  | Docker対応           | 限定的                             | 完全対応                                |
+
+---
 
 ## 基本的な使い方
 ### Docker Buildx
 Docker Buildxは、Docker CLI（コマンドラインインターフェース）のプラグインとして動作する。
-#### 特徴
 
-1. マルチプラットフォームビルド
-   - 異なるプラットフォーム（例`linux/amd64`や`linux/arm64`）向けのコンテナイメージを一度にビルドし、単一のイメージインデックス（マニフェストリスト）として登録できます。
-   - これにより、異なるアーキテクチャをサポートするイメージを一括で管理可能。
-
-2. 複数のビルドドライバー対応
-   - `docker`ドライバー: デフォルトのビルドドライバー。Dockerデーモン内でビルドを実行。
-   - `docker-container`ドライバー: BuildKitを独立したコンテナ内で動作させることで、マルチプラットフォームビルドや高度なキャッシュ機能を利用可能。
-   - `kubernetes`ドライバー: Kubernetes上でBuildKitを動作させるためのドライバー。
-
-3. キャッシュの柔軟な活用
-   - ローカルキャッシュやリモートキャッシュ（例S3バケット）を利用して、ビルド時間を短縮可能。
-
-4. カスタマイズ可能な出力オプション
-   - イメージをローカルにロード（`--load`）したり、Dockerレジストリに直接プッシュ（`--push`）したり、tarファイルとしてエクスポート（`--output type=docker,dest=...`）することが可能。
-
-5. 分散ビルド
-   - 複数のマシンやノードを使用して並列にビルドを実行可能。
 
 #### 利用手順
 
-1. インストールと初期設定
-   Docker BuildxはDocker CLIに組み込まれているため、最新バージョンのDockerをインストールすることで利用できます。
-
+1. `buildx`が使用可能かの確認
    ```bash
    docker buildx version
    ```
+2. 現在のBuildxビルダーの情報を確認
+   ```bash
+   docker buildx ls
+   NAME/NODE     DRIVER/ENDPOINT   STATUS    BUILDKIT   PLATFORMS
+   default*      docker                                 
+    \_ default    \_ default       running   v0.16.0    linux/amd64, linux/amd64/v2, linux/amd64/v3, linux/386
+   ```
+docker-containerドライバーを使用するビルダーがないので、新しいビルダーを作成します。
+3. `qemu-user-static`のインストールと設定
+   1. `qemu-user-static`のインストール
+      ```bash
+      sudo apt update
+      sudo apt install -y qemu qemu-user-static
+      ```
+    2. qemuの登録（Docker用のbinfmtサポート）
+      Dockerがqemuを認識できるようにする
+      ```bash
+      docker run --privileged --rm tonistiigi/binfmt --install all
+      ```
+    3. binfmtの登録が成功しているか確認
+       ```bash
+       docker run --privileged --rm tonistiigi/binfmt
+       ```
+       `linux/arm64`, `darwin/arm64`, `linux/amd64`などが有効になっていると表示される。
+       ```bash
+       user@user:~/ドキュメント/Make_Docker_Image_Script$ docker run --privileged --rm tonistiigi/binfmt --install all
 
-2. ビルダーインスタンスの作成
+
+         Unable to find image 'tonistiigi/binfmt:latest' locally
+         latest: Pulling from tonistiigi/binfmt
+         8d4d64c318a5: Pull complete 
+         e9c608ddc3cb: Pull complete 
+         Digest: sha256:66e***
+         Status: Downloaded newer image for tonistiigi/binfmt:latest
+         {
+           "supported": [
+             "linux/amd64",
+             "linux/arm64",
+             "linux/riscv64",
+             "linux/ppc64le",
+             "linux/s390x",
+             "linux/386",
+             "linux/mips64le",
+             "linux/mips64",
+             "linux/arm/v7",
+             "linux/arm/v6"
+           ],
+           "emulators": [
+             "jar",
+             "llvm-14-runtime.binfmt",
+             "python3.10",
+             "qemu-aarch64",
+             "qemu-alpha",
+             "qemu-arm",
+             "qemu-armeb",
+             "qemu-cris",
+             "qemu-hexagon",
+             "qemu-hppa",
+             "qemu-m68k",
+             "qemu-microblaze",
+             "qemu-mips",
+             "qemu-mips64",
+             "qemu-mips64el",
+             "qemu-mipsel",
+             "qemu-mipsn32",
+             "qemu-mipsn32el",
+             "qemu-ppc",
+             "qemu-ppc64",
+             "qemu-ppc64le",
+             "qemu-riscv32",
+             "qemu-riscv64",
+             "qemu-s390x",
+             "qemu-sh4",
+             "qemu-sh4eb",
+             "qemu-sparc",
+             "qemu-sparc32plus",
+             "qemu-sparc64",
+             "qemu-xtensa",
+             "qemu-xtensaeb"
+           ]
+         }
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+1. ビルダーインスタンスの作成
    Buildxはビルダーインスタンスを使用してビルドを実行します。インスタンスを作成するには以下のコマンドを使用します
 
    ```bash
    docker buildx create --name mybuilder --driver docker-container --use
    ```
 
-3. マルチプラットフォームイメージのビルド
+2. マルチプラットフォームイメージのビルド
    異なるプラットフォーム向けのイメージを一度にビルドするには、`--platform`オプションを指定します。
 
    ```bash
    docker buildx build --platform linux/amd64,linux/arm64 -t myimage:latest --push .
    ```
 
-4. ローカルでのイメージ利用
+3. ローカルでのイメージ利用
    ビルドしたイメージをローカルで利用するには、`--load`オプションを指定します（単一プラットフォームのみ対応）。
 
    ```bash
@@ -187,9 +292,9 @@ Docker Buildxで使用するプラットフォーム指定は、Go言語の標�
 
 
 ```bash
-terms@terms:~/ドキュメント/Make_Docker_Image_Script$ docker buildx version
+user@user:~/ドキュメント/Make_Docker_Image_Script$ docker buildx version
 github.com/docker/buildx v0.17.1 257815a
-terms@terms:~/ドキュメント/Make_Docker_Image_Script$ docker buildx ls
+user@user:~/ドキュメント/Make_Docker_Image_Script$ docker buildx ls
 NAME/NODE     DRIVER/ENDPOINT   STATUS    BUILDKIT   PLATFORMS
 default*      docker                                 
  \_ default    \_ default       running   v0.16.0    linux/amd64, linux/amd64/v2, linux/amd64/v3, linux/386
@@ -201,123 +306,6 @@ default*      docker
 
 
 
-Docker Imageを作成するスクリプトをブラッシュアップします。
-
-
-```bash
-#!/usr/bin/env bash
-set -Ceux -o pipefail
-IFS=$'\n\t'
-
-# -----------------------------------------------------------------
-# サマリー:
-# このスクリプトは、DockerイメージのビルドおよびDocker Hubへのプッシュを自動化します。
-# face01_gpuとface01_no_gpuの2種類のイメージを作成し、それぞれをDocker Hubにプッシュします。
-# -----------------------------------------------------------------
-
-function my_command() {
-    # cd: FACE01_DEV/
-    cd ~/bin/FACE01_DEV
-
-    # ////////////////////////////////////////
-    # face01_gpu
-    # ////////////////////////////////////////
-
-    # docker build: CPU100%になるので他の作業との兼ね合いに注意すること
-    docker build -t tokaikaoninsho/face01_gpu:3.03.04 -f docker/Dockerfile_gpu . --network host
-    # login
-    docker login
-    # docker push
-    docker push tokaikaoninsho/face01_gpu:3.03.04
-
-    # ////////////////////////////////////////
-    # face01_no_gpu
-    # ////////////////////////////////////////
-
-    # docker build: CPU100%になるので他の作業との兼ね合いに注意すること
-    docker build -t tokaikaoninsho/face01_no_gpu:3.03.04 -f docker/Dockerfile_no_gpu . --network host
-    # login
-    docker login
-    # docker push
-    docker push tokaikaoninsho/face01_no_gpu:3.03.04
-
-    return 0
-}
-
-
-function my_error() {
-    zenity --error --text="\
-    失敗しました。
-    "
-    exit 1
-}
-
-my_command || my_error
-```
-自分用に用意してあるbash用のテンプレートを使った形ですが、まずは変数の設定などひと塊にしたコードにします。
-
-```bash
-#!/usr/bin/env bash
-
-: <<'DOCSTRING'
-このスクリプトは、2種類のDockerイメージ（GPU対応版と非対応版）をビルドし、
-Docker Hubにプッシュするプロセスを自動化します。
-
-- ビルド対象:
-    1. face01_gpu
-    2. face01_no_gpu
-- 主な操作:
-    - Dockerイメージのビルド
-    - Docker Hubへのログイン
-    - Dockerイメージのプッシュ
-- 注意:
-    - ビルド中にCPU使用率が高くなるため、他の作業への影響を考慮してください。
-DOCSTRING
-
-set -euo pipefail
-IFS=$'\n\t'
-
-# 定数設定
-WORKDIR=~/bin/FACE01_DEV  # 作業ディレクトリ
-DOCKER_REPO=tokaikaoninsho
-TAG=3.03.04
-
-# Dockerイメージをビルドしてプッシュする関数
-build_and_push_image() {
-    local image_name=$1   # イメージ名
-    local dockerfile=$2   # 使用するDockerfile
-
-    echo "Building Docker image: ${image_name}:${TAG}"
-    docker build -t "${DOCKER_REPO}/${image_name}:${TAG}" -f "${dockerfile}" . --network host
-
-    echo "Pushing Docker image: ${DOCKER_REPO}/${image_name}:${TAG}"
-    # ログイン
-    docker login
-    docker push "${DOCKER_REPO}/${image_name}:${TAG}"
-}
-
-# メイン処理
-main() {
-    # 作業ディレクトリに移動
-    cd "${WORKDIR}"
-
-    # GPU対応版のイメージ
-    build_and_push_image "face01_gpu" "docker/Dockerfile_gpu"
-
-    # 非GPU対応版のイメージ
-    build_and_push_image "face01_no_gpu" "docker/Dockerfile_no_gpu"
-}
-
-# エラー時の処理
-error_handler() {
-    echo "エラーが発生しました。" >&2
-    exit 1
-}
-
-# 実行
-trap error_handler ERR
-main
-```
 
 
 ## 参考文献
